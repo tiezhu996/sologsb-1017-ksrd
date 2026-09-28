@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { sampleScript } from './sample'
-import type { Character, ContinuityState, DiffItem, Prop, Reply, Scene, Script, Version, Wardrobe, WarningItem, WarningReview } from './types'
+import type { BlockedScene, Character, ContinuityState, DiffItem, Prop, Reply, Scene, Script, ShootUnit, UnitReviewResult, Version, Wardrobe, WarningItem, WarningReview } from './types'
 
 const STORAGE_KEY = 'sologsb-1017-continuity-v1'
 const clone = <T,>(value: T): T => structuredClone(value)
@@ -99,6 +99,34 @@ export function deriveWarnings(script: Script): WarningItem[] {
   return warnings
 }
 
+export function parseStoryDay(storyTime: string): number | null {
+  const match = storyTime.match(/第\s*(\d+)\s*天/)
+  return match ? Number(match[1]) : null
+}
+
+/**
+ * 连拍单元：相邻场次中故事时间属同一天、且地点与日夜完全一致的归入同一组。
+ * 故事时间无法解析出“第 N 天”的场次自成单元，不会与邻场合并。
+ * 顺序或时间一改，这里随脚本重新计算，所以不需要持久化单元本身。
+ */
+export function deriveShootUnits(scenes: Scene[]): ShootUnit[] {
+  const units: ShootUnit[] = []
+  scenes.forEach((scene, index) => {
+    const day = parseStoryDay(scene.storyTime)
+    const previous = units[units.length - 1]
+    const previousScene = scenes[index - 1]
+    const sameUnit =
+      day !== null &&
+      previous &&
+      previous.storyDay === day &&
+      previousScene?.location === scene.location &&
+      previousScene?.dayNight === scene.dayNight
+    if (sameUnit) previous.scenes.push(scene)
+    else units.push({ id: `unit-${units.length}`, storyDay: day, scenes: [scene] })
+  })
+  return units
+}
+
 export function diffScript(base: Script, current: Script): DiffItem[] {
   const fields: Array<{ key: keyof Scene; label: string }> = [
     { key: 'slug', label: '场名' },
@@ -138,8 +166,8 @@ export function diffScript(base: Script, current: Script): DiffItem[] {
 export function useContinuityStore() {
   const [state, setState] = useState<ContinuityState>(initialState)
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving'>('saved')
-  const undoRef = useRef<Script[]>([])
-  const redoRef = useRef<Script[]>([])
+  const undoRef = useRef<Array<Pick<ContinuityState, 'script' | 'reviews'>>>([])
+  const redoRef = useRef<Array<Pick<ContinuityState, 'script' | 'reviews'>>>([])
   const saveTimer = useRef<number | undefined>(undefined)
 
   useEffect(() => {
@@ -152,23 +180,30 @@ export function useContinuityStore() {
     return () => window.clearTimeout(saveTimer.current)
   }, [state])
 
-  const mutate = useCallback((mutator: (script: Script) => void) => {
+  // 所有可撤销的修改都走这里：历史栈同时保存剧本与审阅决定，
+  // 因此整组接受/忽略和逐条审阅一样可以撤销、重做并随本地保存保留。
+  const commit = useCallback((producer: (draft: ContinuityState) => void) => {
     setState((previous) => {
-      const next = clone(previous.script)
-      mutator(next)
-      undoRef.current.push(clone(previous.script))
+      undoRef.current.push({ script: clone(previous.script), reviews: clone(previous.reviews) })
       if (undoRef.current.length > 80) undoRef.current.shift()
       redoRef.current = []
-      return { ...previous, script: next, updatedAt: new Date().toISOString() }
+      const next = clone(previous)
+      producer(next)
+      next.updatedAt = new Date().toISOString()
+      return next
     })
   }, [])
+
+  const mutate = useCallback((mutator: (script: Script) => void) => {
+    commit((draft) => { mutator(draft.script) })
+  }, [commit])
 
   const undo = useCallback(() => {
     setState((previous) => {
       const target = undoRef.current.pop()
       if (!target) return previous
-      redoRef.current.push(clone(previous.script))
-      return { ...previous, script: target, updatedAt: new Date().toISOString() }
+      redoRef.current.push({ script: clone(previous.script), reviews: clone(previous.reviews) })
+      return { ...previous, script: target.script, reviews: target.reviews, updatedAt: new Date().toISOString() }
     })
   }, [])
 
@@ -176,8 +211,8 @@ export function useContinuityStore() {
     setState((previous) => {
       const target = redoRef.current.pop()
       if (!target) return previous
-      undoRef.current.push(clone(previous.script))
-      return { ...previous, script: target, updatedAt: new Date().toISOString() }
+      undoRef.current.push({ script: clone(previous.script), reviews: clone(previous.reviews) })
+      return { ...previous, script: target.script, reviews: target.reviews, updatedAt: new Date().toISOString() }
     })
   }, [])
 
@@ -280,15 +315,31 @@ export function useContinuityStore() {
   }, [mutate])
 
   const setReviewStatus = useCallback((warningId: string, status: WarningReview['status']) => {
-    setState((previous) => ({
-      ...previous,
-      reviews: {
-        ...previous.reviews,
-        [warningId]: { ...(previous.reviews[warningId] ?? { replies: [] }), status }
-      },
-      updatedAt: new Date().toISOString()
-    }))
-  }, [])
+    commit((draft) => {
+      draft.reviews[warningId] = { ...(draft.reviews[warningId] ?? { replies: [] }), status }
+    })
+  }, [commit])
+
+  const reviewShootUnit = useCallback((unit: ShootUnit, status: WarningReview['status']): UnitReviewResult => {
+    const blocked: BlockedScene[] = unit.scenes.flatMap((scene) => {
+      const reasons: BlockedScene['reasons'] = []
+      if (scene.status === 'locked') reasons.push('locked')
+      if (!scene.reason.trim()) reasons.push('missing-reason')
+      return reasons.length ? [{ sceneId: scene.id, number: scene.number, slug: scene.slug, reasons }] : []
+    })
+    if (blocked.length) return { ok: false, blocked, applied: 0 }
+
+    // 用当前脚本即时推导组内问题（保证与界面看到的单元一致），提交时只做状态写入。
+    const unitSceneIds = new Set(unit.scenes.map((scene) => scene.id))
+    const unitWarnings = deriveWarnings(state.script).filter((warning) => unitSceneIds.has(warning.sceneId))
+    const applied = unitWarnings.filter((warning) => (state.reviews[warning.id]?.status ?? 'pending') !== status).length
+    commit((draft) => {
+      unitWarnings.forEach((warning) => {
+        draft.reviews[warning.id] = { ...(draft.reviews[warning.id] ?? { replies: [] }), status }
+      })
+    })
+    return { ok: true, blocked, applied }
+  }, [commit, state.script, state.reviews])
 
   const addReply = useCallback((warningId: string, author: string, text: string) => {
     if (!text.trim()) return
@@ -307,26 +358,47 @@ export function useContinuityStore() {
   }, [])
 
   const createVersion = useCallback((name: string) => {
-    const version: Version = { id: id('version'), name: name.trim() || `版本 ${state.versions.length + 1}`, createdAt: new Date().toISOString(), script: clone(state.script) }
+    const version: Version = {
+      id: id('version'),
+      name: name.trim() || `版本 ${state.versions.length + 1}`,
+      createdAt: new Date().toISOString(),
+      script: clone(state.script),
+      reviews: clone(state.reviews)
+    }
     setState((previous) => ({ ...previous, versions: [version, ...previous.versions] }))
     return version
-  }, [state.script, state.versions.length])
+  }, [state.script, state.reviews, state.versions.length])
 
   const restoreVersion = useCallback((versionId: string) => {
-    const version = state.versions.find((item) => item.id === versionId)
-    if (!version) return
-    mutate((script) => { Object.assign(script, clone(version.script)) })
-  }, [mutate, state.versions])
+    setState((previous) => {
+      const version = previous.versions.find((item) => item.id === versionId)
+      if (!version) return previous
+      // 恢复版本同样可撤销：剧本与审阅决定一起回滚到快照时的状态。
+      undoRef.current.push({ script: clone(previous.script), reviews: clone(previous.reviews) })
+      redoRef.current = []
+      return {
+        ...previous,
+        script: clone(version.script),
+        reviews: clone(version.reviews ?? {}),
+        updatedAt: new Date().toISOString()
+      }
+    })
+  }, [])
 
   const reset = useCallback(() => {
-    mutate((script) => { Object.assign(script, clone(sampleScript)) })
-    setState((previous) => ({ ...previous, reviews: {} }))
-  }, [mutate])
+    commit((draft) => {
+      Object.assign(draft.script, clone(sampleScript))
+      draft.reviews = {}
+    })
+  }, [commit])
+
+  const shootUnits = useMemo(() => deriveShootUnits(state.script.scenes), [state.script.scenes])
 
   return {
     state,
     saveStatus,
     warnings: deriveWarnings(state.script),
+    shootUnits,
     updateScriptField,
     updateScene,
     toggleSceneRelation,
@@ -341,6 +413,7 @@ export function useContinuityStore() {
     addWardrobe,
     updateWardrobe,
     setReviewStatus,
+    reviewShootUnit,
     addReply,
     createVersion,
     restoreVersion,

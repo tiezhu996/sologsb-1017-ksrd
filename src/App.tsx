@@ -33,6 +33,8 @@ import {
   Block,
   CheckCircle,
   Close,
+  Groups,
+  Lock,
   Storage,
   Difference,
   Keyboard,
@@ -46,7 +48,7 @@ import {
   WarningAmber
 } from '@mui/icons-material'
 import { diffScript, useContinuityStore } from './store'
-import type { RevisionColor, Scene, WarningItem, WarningStatus } from './types'
+import type { BlockedScene, RevisionColor, Scene, ShootUnit, WarningItem, WarningStatus } from './types'
 
 const revisionOptions: Array<{ value: RevisionColor; label: string; color: string }> = [
   { value: 'white', label: '白纸', color: '#f7f5ee' },
@@ -68,6 +70,16 @@ function Highlight({ text, query }: { text: string; query: string }) {
   const index = text.toLowerCase().indexOf(query.toLowerCase())
   if (index < 0) return <>{text}</>
   return <>{text.slice(0, index)}<mark>{text.slice(index, index + query.length)}</mark>{text.slice(index + query.length)}</>
+}
+
+const unitKey = (unit: ShootUnit) => unit.scenes.map((scene) => scene.id).join('|')
+
+function UnitBlockerNote({ blocked }: { blocked: BlockedScene[] }) {
+  if (!blocked.length) return null
+  const detail = blocked
+    .map((scene) => `场景 ${scene.number}《${scene.slug}》（${scene.reasons.map((reason) => reason === 'locked' ? '已锁定' : '修改理由为空').join('、')}）`)
+    .join('；')
+  return <Alert severity="error" icon={<Block />} className="unit-blocker">{detail}，整组操作未生效。</Alert>
 }
 
 function SceneCard({ scene, query, active, onOpen }: { scene: Scene; query: string; active: boolean; onOpen: () => void }) {
@@ -104,9 +116,9 @@ function SceneCard({ scene, query, active, onOpen }: { scene: Scene; query: stri
 
 export default function App() {
   const store = useContinuityStore()
-  const { state, warnings } = store
+  const { state, warnings, shootUnits } = store
   const [selectedSceneId, setSelectedSceneId] = useState(state.script.scenes[0]?.id ?? '')
-  const [view, setView] = useState<'outline' | 'detail' | 'warnings' | 'versions'>('outline')
+  const [view, setView] = useState<'outline' | 'detail' | 'units' | 'warnings' | 'versions'>('outline')
   const [query, setQuery] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
   const [libraryTab, setLibraryTab] = useState('characters')
@@ -115,12 +127,29 @@ export default function App() {
   const [selectedVersionId, setSelectedVersionId] = useState('')
   const [warningFilter, setWarningFilter] = useState<'all' | WarningStatus>('all')
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({})
+  const [unitNotices, setUnitNotices] = useState<Record<string, BlockedScene[]>>({})
   const [shortcutOpen, setShortcutOpen] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
 
   const selectedScene = state.script.scenes.find((scene) => scene.id === selectedSceneId) ?? state.script.scenes[0]
   const pendingWarnings = warnings.filter((warning) => (state.reviews[warning.id]?.status ?? 'pending') === 'pending')
   const visibleWarnings = warnings.filter((warning) => warningFilter === 'all' || (state.reviews[warning.id]?.status ?? 'pending') === warningFilter)
+  const unitStats = useMemo(() => {
+    const stats = new Map<string, { pending: number; accepted: number; ignored: number }>()
+    shootUnits.forEach((unit) => {
+      const counts = { pending: 0, accepted: 0, ignored: 0 }
+      unit.scenes.forEach((scene) => {
+        warnings.forEach((warning) => {
+          if (warning.sceneId !== scene.id) return
+          counts[(state.reviews[warning.id]?.status ?? 'pending') as WarningStatus] += 1
+        })
+      })
+      stats.set(unitKey(unit), counts)
+    })
+    return stats
+  }, [shootUnits, warnings, state.reviews])
+  const totalUnitPending = shootUnits.reduce((total, unit) => total + (unitStats.get(unitKey(unit))?.pending ?? 0), 0)
+  const selectedUnit = selectedScene ? shootUnits.find((unit) => unit.scenes.some((scene) => scene.id === selectedScene.id)) : undefined
   const selectedVersion = state.versions.find((version) => version.id === selectedVersionId) ?? state.versions[0]
   const diff = useMemo(() => selectedVersion ? diffScript(selectedVersion.script, state.script) : [], [selectedVersion, state.script])
   const searchResults = useMemo(() => {
@@ -135,6 +164,15 @@ export default function App() {
   useEffect(() => {
     if (!state.script.scenes.some((scene) => scene.id === selectedSceneId)) setSelectedSceneId(state.script.scenes[0]?.id ?? '')
   }, [selectedSceneId, state.script.scenes])
+
+  // 单元派生信息会随脚本即时重算；场次一变（顺序、时间、地点、锁定、理由），
+  // 之前“被某场挡住”的提示也应作废，避免显示过期的拦截原因。
+  const unitSignature = state.script.scenes
+    .map((scene) => [scene.id, scene.location, scene.dayNight, scene.storyTime, scene.status, scene.reason.trim()].join('~'))
+    .join('|')
+  useEffect(() => {
+    setUnitNotices({})
+  }, [unitSignature])
 
   useEffect(() => {
     const onKeydown = (event: KeyboardEvent) => {
@@ -184,6 +222,26 @@ export default function App() {
     setVersionDialog(false)
   }
 
+  function unitBlockers(unit: ShootUnit): BlockedScene[] {
+    return unit.scenes.flatMap((scene) => {
+      const reasons: BlockedScene['reasons'] = []
+      if (scene.status === 'locked') reasons.push('locked')
+      if (!scene.reason.trim()) reasons.push('missing-reason')
+      return reasons.length ? [{ sceneId: scene.id, number: scene.number, slug: scene.slug, reasons }] : []
+    })
+  }
+
+  function applyUnitReview(unit: ShootUnit, status: 'accepted' | 'ignored') {
+    const result = store.reviewShootUnit(unit, status)
+    if (!result.ok) setUnitNotices((previous) => ({ ...previous, [unitKey(unit)]: result.blocked }))
+    else setUnitNotices((previous) => {
+      if (!(unitKey(unit) in previous)) return previous
+      const next = { ...previous }
+      delete next[unitKey(unit)]
+      return next
+    })
+  }
+
   function renderOutline() {
     return (
       <Box>
@@ -191,12 +249,33 @@ export default function App() {
           <Box>
             <Typography className="eyebrow">SCREENPLAY OVERVIEW</Typography>
             <Typography variant="h4">故事大纲</Typography>
-            <Typography color="text.secondary">按当前场次顺序检查人物出场、道具建立与时间推进。</Typography>
+            <Typography color="text.secondary">相邻且同一天、同地点、同日夜的场次自动归入同一连拍单元。</Typography>
           </Box>
           <Button variant="contained" startIcon={<Add />} onClick={() => { const sceneId = store.addScene(); setSelectedSceneId(sceneId); setView('detail') }}>新增场景</Button>
         </Stack>
         <Box className="outline-grid">
-          {state.script.scenes.map((scene) => <SceneCard key={scene.id} scene={scene} query={query} active={scene.id === selectedScene?.id} onOpen={() => openScene(scene.id)} />)}
+          {shootUnits.map((unit) => {
+            const counts = unitStats.get(unitKey(unit)) ?? { pending: 0, accepted: 0, ignored: 0 }
+            const blockers = unitBlockers(unit)
+            return (
+              <Box key={unitKey(unit)} className={unit.scenes.length > 1 ? 'unit-group' : 'unit-single'}>
+                {unit.scenes.length > 1 && (
+                  <button className="unit-band" onClick={() => setView('units')}>
+                    <Groups fontSize="small" />
+                    <strong>连拍单元 · {unit.storyDay !== null ? `第 ${unit.storyDay} 天` : '日期未知'}</strong>
+                    <span>{unit.scenes[0].location} · {unit.scenes[0].dayNight} · {unit.scenes.length} 场连拍</span>
+                    <span className="unit-band-counts">
+                      待审 {counts.pending} / 已接受 {counts.accepted} / 已忽略 {counts.ignored}
+                    </span>
+                    {blockers.length > 0 && <Chip size="small" color="error" label={`${blockers.length} 场挡住整组操作`} />}
+                  </button>
+                )}
+                <Box className="unit-group-cards">
+                  {unit.scenes.map((scene) => <SceneCard key={scene.id} scene={scene} query={query} active={scene.id === selectedScene?.id} onOpen={() => openScene(scene.id)} />)}
+                </Box>
+              </Box>
+            )
+          })}
         </Box>
       </Box>
     )
@@ -238,6 +317,47 @@ export default function App() {
             <Button size="small" onClick={() => setView('warnings')}>前往审阅</Button>
           </Alert>
         )}
+
+        {selectedUnit && selectedUnit.scenes.length > 1 && (() => {
+          const counts = unitStats.get(unitKey(selectedUnit)) ?? { pending: 0, accepted: 0, ignored: 0 }
+          const blockers = unitBlockers(selectedUnit)
+          const notice = unitNotices[unitKey(selectedUnit)]
+          return (
+            <Paper className="unit-banner" elevation={0}>
+              <Box className="unit-banner-head">
+                <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
+                  <Groups />
+                  <Typography variant="h6">连拍单元 · {selectedUnit.storyDay !== null ? `第 ${selectedUnit.storyDay} 天` : '日期未知'}</Typography>
+                  <Chip size="small" label={`${selectedUnit.scenes[0].location} · ${selectedUnit.scenes[0].dayNight}`} />
+                </Stack>
+                <Stack direction="row" gap={1} flexWrap="wrap">
+                  <Button size="small" variant="outlined" startIcon={<CheckCircle />} disabled={counts.pending === 0} onClick={() => applyUnitReview(selectedUnit, 'accepted')}>整组接受</Button>
+                  <Button size="small" variant="outlined" color="inherit" startIcon={<Block />} disabled={counts.pending === 0} onClick={() => applyUnitReview(selectedUnit, 'ignored')}>整组忽略</Button>
+                  <Button size="small" onClick={() => setView('units')}>连拍单元总览</Button>
+                </Stack>
+              </Box>
+              <Stack direction="row" gap={1.5} flexWrap="wrap" className="unit-banner-meta">
+                <span>组内场次：
+                  {selectedUnit.scenes.map((scene) => (
+                    <Chip
+                      key={scene.id}
+                      size="small"
+                      className={scene.id === selectedScene.id ? 'unit-member current' : 'unit-member'}
+                      icon={scene.status === 'locked' ? <Lock /> : undefined}
+                      label={`${scene.number} ${scene.slug}${scene.reason.trim() ? '' : ' · 理由空'}`}
+                      color={!scene.reason.trim() || scene.status === 'locked' ? 'error' : scene.id === selectedScene.id ? 'primary' : 'default'}
+                      variant={scene.id === selectedScene.id ? 'filled' : 'outlined'}
+                      onClick={() => openScene(scene.id)}
+                    />
+                  ))}
+                </span>
+                <span className="unit-counts">待审 {counts.pending} · 已接受 {counts.accepted} · 已忽略 {counts.ignored}</span>
+              </Stack>
+              {blockers.length > 0 && !notice && <UnitBlockerNote blocked={blockers} />}
+              {notice && <UnitBlockerNote blocked={notice} />}
+            </Paper>
+          )
+        })()}
 
         <Paper className="editor-paper" elevation={0}>
           <Typography variant="h6">场次信息</Typography>
@@ -321,6 +441,71 @@ export default function App() {
             </Box>
           )}
         </Paper>
+      </Box>
+    )
+  }
+
+  function renderUnits() {
+    return (
+      <Box>
+        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={2} mb={2}>
+          <Box>
+            <Typography className="eyebrow">SHOOT UNITS</Typography>
+            <Typography variant="h4">连拍单元</Typography>
+            <Typography color="text.secondary">相邻场次中故事时间同一天、地点与日夜一致即自动成组；调整顺序或时间后立即重算。</Typography>
+          </Box>
+          <Chip label={`待审问题 ${totalUnitPending}`} color={totalUnitPending ? 'warning' : 'success'} />
+        </Stack>
+        <Stack gap={1.5}>
+          {shootUnits.map((unit) => {
+            const key = unitKey(unit)
+            const counts = unitStats.get(key) ?? { pending: 0, accepted: 0, ignored: 0 }
+            const blockers = unitBlockers(unit)
+            const notice = unitNotices[key]
+            const multi = unit.scenes.length > 1
+            return (
+              <Paper key={key} className={`unit-card ${multi ? 'multi' : 'single'} ${blockers.length ? 'blocked' : ''}`} elevation={0}>
+                <Box className="unit-card-head">
+                  <Box className="unit-icon"><Groups /></Box>
+                  <Box flex={1} minWidth={0}>
+                    <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
+                      <Typography variant="h6">
+                        {multi ? `第 ${unit.storyDay !== null ? unit.storyDay : '?'} 天 · ${unit.scenes[0].location} · ${unit.scenes[0].dayNight}` : `单场单元 · ${unit.scenes[0].slug}`}
+                      </Typography>
+                      <Chip size="small" label={`${unit.scenes.length} 场连拍`} variant={multi ? 'filled' : 'outlined'} color={multi ? 'secondary' : 'default'} />
+                      {!multi && <Chip size="small" variant="outlined" label={unit.storyDay !== null ? `第 ${unit.storyDay} 天` : '故事时间未识别'} />}
+                    </Stack>
+                    <Box className="unit-scene-list">
+                      {unit.scenes.map((scene) => (
+                        <Chip
+                          key={scene.id}
+                          size="small"
+                          className="unit-member"
+                          icon={scene.status === 'locked' ? <Lock /> : undefined}
+                          label={`${scene.number} ${scene.slug}${scene.reason.trim() ? '' : ' · 理由空'}`}
+                          color={scene.status === 'locked' || !scene.reason.trim() ? 'error' : 'default'}
+                          variant="outlined"
+                          onClick={() => openScene(scene.id)}
+                        />
+                      ))}
+                    </Box>
+                  </Box>
+                  <Box className="unit-count-row">
+                    <Chip size="small" color="warning" label={`待审 ${counts.pending}`} />
+                    <Chip size="small" color="success" variant="outlined" label={`已接受 ${counts.accepted}`} />
+                    <Chip size="small" variant="outlined" label={`已忽略 ${counts.ignored}`} />
+                  </Box>
+                </Box>
+                <Stack direction="row" gap={1} mt={1.5} flexWrap="wrap" alignItems="center">
+                  <Button size="small" variant="contained" startIcon={<CheckCircle />} disabled={counts.pending === 0} onClick={() => applyUnitReview(unit, 'accepted')}>整组接受</Button>
+                  <Button size="small" variant="outlined" color="inherit" startIcon={<Block />} disabled={counts.pending === 0} onClick={() => applyUnitReview(unit, 'ignored')}>整组忽略</Button>
+                  {blockers.length > 0 && <Typography variant="caption" color="error">组内有 {blockers.length} 场挡住整组操作</Typography>}
+                </Stack>
+                {notice && <Box mt={1.5}><UnitBlockerNote blocked={notice} /></Box>}
+              </Paper>
+            )
+          })}
+        </Stack>
       </Box>
     )
   }
@@ -500,6 +685,7 @@ export default function App() {
       <Box className="status-strip">
         <span>{store.saveStatus === 'saved' ? '● 已保存到本机' : '◌ 正在保存'}</span>
         <span>{state.script.scenes.length} 场 / {state.script.scenes.reduce((total, scene) => total + scene.pageLength, 0).toFixed(2)} 页</span>
+        <span>{shootUnits.filter((unit) => unit.scenes.length > 1).length} 个连拍单元</span>
         <span className={pendingWarnings.length ? 'attention' : ''}>{pendingWarnings.length} 条问题待审</span>
         <span>所有修改自动保存在浏览器本地</span>
       </Box>
@@ -525,6 +711,7 @@ export default function App() {
       <Tabs value={view} onChange={(_, value) => setView(value)} variant="scrollable" className="view-tabs">
         <Tab value="outline" label="大纲视图" />
         <Tab value="detail" label="场景详情" />
+        <Tab value="units" label={<Badge badgeContent={totalUnitPending} color="secondary"><span className="tab-label">连拍单元</span></Badge>} />
         <Tab value="warnings" label={<Badge badgeContent={pendingWarnings.length} color="warning"><span className="tab-label">警告审阅</span></Badge>} />
         <Tab value="versions" label={<Badge badgeContent={state.versions.length} color="secondary"><span className="tab-label">版本差异</span></Badge>} />
       </Tabs>
@@ -549,6 +736,7 @@ export default function App() {
         )}
         {view === 'outline' && renderOutline()}
         {view === 'detail' && renderSceneDetail()}
+        {view === 'units' && renderUnits()}
         {view === 'warnings' && renderWarnings()}
         {view === 'versions' && renderVersions()}
       </Box>
@@ -651,7 +839,7 @@ export default function App() {
       <Dialog open={versionDialog} onClose={() => setVersionDialog(false)} fullWidth maxWidth="sm">
         <DialogTitle>保存剧本版本</DialogTitle>
         <DialogContent>
-          <Typography color="text.secondary" mb={2}>版本会保存当前全部场景、资料库和审阅备注的快照，之后可与工作稿比较或恢复。</Typography>
+          <Typography color="text.secondary" mb={2}>版本会保存当前全部场景、资料库，以及连拍单元在内的审阅决定与回复快照，之后可与工作稿比较或整体恢复。</Typography>
           <TextField autoFocus fullWidth label="版本名称" value={versionName} onChange={(event) => setVersionName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') createVersion() }} />
         </DialogContent>
         <DialogActions><Button onClick={() => setVersionDialog(false)}>取消</Button><Button variant="contained" onClick={createVersion}>保存</Button></DialogActions>

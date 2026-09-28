@@ -81,6 +81,28 @@ export interface Version {
   name: string
   createdAt: string
   script: Script
+  reviews: Record<string, WarningReview>
+}
+
+export interface ShootUnit {
+  id: string
+  /** 故事时间中解析出的“第 N 天”；无法解析时为 null，该场自成单元。 */
+  storyDay: number | null
+  /** 组成单元的场次按当前剧本顺序排列。 */
+  scenes: Scene[]
+}
+
+export interface BlockedScene {
+  sceneId: string
+  number: string
+  slug: string
+  reasons: Array<'locked' | 'missing-reason'>
+}
+
+export interface UnitReviewResult {
+  ok: boolean
+  blocked: BlockedScene[]
+  applied: number
 }
 
 export interface ContinuityState {

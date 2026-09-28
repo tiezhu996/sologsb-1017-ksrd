@@ -27,12 +27,20 @@ export const sampleScript: Script = {
       characterIds: ['char-lin', 'char-su'], propIds: ['prop-recorder'], costumes: { 'char-lin': 'ward-lin-jacket', 'char-su': 'ward-su-coat' }, revision: 'white', status: 'review', reason: '加强苏遥主动接近林默的动机。'
     },
     {
+      id: 'scene-1b', number: '1B', slug: '维修铺·登门', synopsis: '两人连夜带着录音赶到维修铺，请老师傅辨认声音来源。', intExt: 'INT', location: '船舶维修铺', dayNight: '夜', storyTime: '第 1 天 23:00', pageLength: 1.25,
+      characterIds: ['char-lin', 'char-su'], propIds: ['prop-recorder'], costumes: { 'char-lin': 'ward-lin-jacket', 'char-su': 'ward-su-coat' }, revision: 'blue', status: 'draft', reason: '新增过场，保证从堤岸到维修铺的空间连续。'
+    },
+    {
       id: 'scene-2', number: '2', slug: '维修铺·录音', synopsis: '录音里出现林默失踪兄长的声音，画面切入回忆。', intExt: 'INT', location: '船舶维修铺', dayNight: '夜', storyTime: '第 1 天 23:20', pageLength: 1.5,
       characterIds: ['char-lin', 'char-su', 'char-zhou'], propIds: ['prop-recorder', 'prop-ticket'], costumes: { 'char-lin': 'ward-lin-jacket', 'char-su': 'ward-su-coat' }, revision: 'blue', status: 'draft', reason: '将录音身份从陌生人改为兄长。'
     },
     {
       id: 'scene-3', number: '3', slug: '售票厅·白日', synopsis: '两人核对船票，发现日期与海难发生日不吻合。', intExt: 'INT', location: '废弃售票厅', dayNight: '白天', storyTime: '第 2 天 10:10', pageLength: 2.75,
       characterIds: ['char-lin', 'char-su'], propIds: ['prop-ticket', 'prop-recorder'], costumes: { 'char-lin': 'ward-lin-jacket', 'char-su': 'ward-su-coat' }, revision: 'pink', status: 'draft', reason: '合并原第 3、4 场，避免重复解释。'
+    },
+    {
+      id: 'scene-3b', number: '3B', slug: '售票厅·追问', synopsis: '林默追问船票出处，苏遥发现售票窗口留有新的撬痕。', intExt: 'INT', location: '废弃售票厅', dayNight: '白天', storyTime: '第 2 天 10:40', pageLength: 1.0,
+      characterIds: ['char-lin', 'char-su'], propIds: ['prop-ticket', 'prop-recorder'], costumes: { 'char-lin': 'ward-lin-jacket', 'char-su': 'ward-su-coat' }, revision: 'yellow', status: 'locked', reason: ''
     },
     {
       id: 'scene-4', number: '4', slug: '灯塔·黎明', synopsis: '乔叔交出铜钥匙，苏遥确认录音经过剪辑。', intExt: 'EXT', location: '北岬灯塔', dayNight: '清晨', storyTime: '第 2 天 05:30', pageLength: 3.5,
