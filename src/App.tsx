@@ -45,8 +45,8 @@ import {
   Undo,
   WarningAmber
 } from '@mui/icons-material'
-import { diffScript, useContinuityStore } from './store'
-import type { RevisionColor, Scene, WarningItem, WarningStatus } from './types'
+import { diffScript, getUnitBlockers, useContinuityStore } from './store'
+import type { RevisionColor, Scene, ShootingUnit, UnitBlocker, WarningItem, WarningStatus } from './types'
 
 const revisionOptions: Array<{ value: RevisionColor; label: string; color: string }> = [
   { value: 'white', label: '白纸', color: '#f7f5ee' },
@@ -70,7 +70,7 @@ function Highlight({ text, query }: { text: string; query: string }) {
   return <>{text.slice(0, index)}<mark>{text.slice(index, index + query.length)}</mark>{text.slice(index + query.length)}</>
 }
 
-function SceneCard({ scene, query, active, onOpen }: { scene: Scene; query: string; active: boolean; onOpen: () => void }) {
+function SceneCard({ scene, query, active, unitLabel, onOpen }: { scene: Scene; query: string; active: boolean; unitLabel?: string; onOpen: () => void }) {
   return (
     <Paper
       component="article"
@@ -87,6 +87,7 @@ function SceneCard({ scene, query, active, onOpen }: { scene: Scene; query: stri
           <Typography variant="h6"><Highlight text={scene.slug} query={query} /></Typography>
           <Chip size="small" label={`${scene.intExt}. ${scene.location}`} />
           <Chip size="small" label={scene.dayNight} variant="outlined" />
+          {unitLabel && <Chip size="small" color="info" label={unitLabel} variant="outlined" />}
           <Chip size="small" label={scene.status === 'locked' ? '锁定' : scene.status === 'review' ? '待审' : '草稿'} color={scene.status === 'review' ? 'warning' : 'default'} />
           <span className={`revision-dot revision-${scene.revision}`} title={`修订色：${scene.revision}`} />
         </Stack>
@@ -104,9 +105,9 @@ function SceneCard({ scene, query, active, onOpen }: { scene: Scene; query: stri
 
 export default function App() {
   const store = useContinuityStore()
-  const { state, warnings } = store
+  const { state, warnings, units } = store
   const [selectedSceneId, setSelectedSceneId] = useState(state.script.scenes[0]?.id ?? '')
-  const [view, setView] = useState<'outline' | 'detail' | 'warnings' | 'versions'>('outline')
+  const [view, setView] = useState<'outline' | 'detail' | 'units' | 'warnings' | 'versions'>('outline')
   const [query, setQuery] = useState('')
   const [libraryOpen, setLibraryOpen] = useState(false)
   const [libraryTab, setLibraryTab] = useState('characters')
@@ -114,12 +115,14 @@ export default function App() {
   const [versionName, setVersionName] = useState('')
   const [selectedVersionId, setSelectedVersionId] = useState('')
   const [warningFilter, setWarningFilter] = useState<'all' | WarningStatus>('all')
+  const [unitActionFeedback, setUnitActionFeedback] = useState<Record<string, { severity: 'success' | 'error'; message: string; blockers?: UnitBlocker[] }>>({})
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({})
   const [shortcutOpen, setShortcutOpen] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
 
   const selectedScene = state.script.scenes.find((scene) => scene.id === selectedSceneId) ?? state.script.scenes[0]
   const pendingWarnings = warnings.filter((warning) => (state.reviews[warning.id]?.status ?? 'pending') === 'pending')
+  const pendingUnits = units.filter((unit) => (state.unitReviews[unit.id] ?? 'pending') === 'pending')
   const visibleWarnings = warnings.filter((warning) => warningFilter === 'all' || (state.reviews[warning.id]?.status ?? 'pending') === warningFilter)
   const selectedVersion = state.versions.find((version) => version.id === selectedVersionId) ?? state.versions[0]
   const diff = useMemo(() => selectedVersion ? diffScript(selectedVersion.script, state.script) : [], [selectedVersion, state.script])
@@ -184,6 +187,46 @@ export default function App() {
     setVersionDialog(false)
   }
 
+  function getUnitWarningStatuses(unit: ShootingUnit): WarningStatus[] {
+    const sceneIds = new Set(unit.sceneIds)
+    return warnings
+      .filter((warning) => sceneIds.has(warning.sceneId))
+      .map((warning) => state.reviews[warning.id]?.status ?? 'pending')
+  }
+
+  function getUnitCounts(unit: ShootingUnit) {
+    const statuses = getUnitWarningStatuses(unit)
+    return {
+      pending: statuses.filter((status) => status === 'pending').length,
+      accepted: statuses.filter((status) => status === 'accepted').length,
+      ignored: statuses.filter((status) => status === 'ignored').length
+    }
+  }
+
+  const unitBySceneId = useMemo(() => {
+    const map = new Map<string, ShootingUnit>()
+    units.forEach((unit) => unit.sceneIds.forEach((sceneId) => map.set(sceneId, unit)))
+    return map
+  }, [units])
+
+  const unitNumberById = useMemo(() => new Map(units.map((unit, index) => [unit.id, index + 1])), [units])
+
+  function applyUnitReview(unit: ShootingUnit, status: WarningStatus) {
+    const result = store.setUnitReviewStatus(unit, status)
+    if (result.ok) {
+      setUnitActionFeedback((previous) => ({
+        ...previous,
+        [unit.id]: { severity: 'success', message: status === 'accepted' ? '已整组接受该连拍单元。' : '已整组忽略该连拍单元。' }
+      }))
+      return
+    }
+
+    setUnitActionFeedback((previous) => ({
+      ...previous,
+      [unit.id]: { severity: 'error', message: '操作未生效：请先处理以下场次。', blockers: result.blockers }
+    }))
+  }
+
   function renderOutline() {
     return (
       <Box>
@@ -196,7 +239,16 @@ export default function App() {
           <Button variant="contained" startIcon={<Add />} onClick={() => { const sceneId = store.addScene(); setSelectedSceneId(sceneId); setView('detail') }}>新增场景</Button>
         </Stack>
         <Box className="outline-grid">
-          {state.script.scenes.map((scene) => <SceneCard key={scene.id} scene={scene} query={query} active={scene.id === selectedScene?.id} onOpen={() => openScene(scene.id)} />)}
+          {state.script.scenes.map((scene) => (
+            <SceneCard
+              key={scene.id}
+              scene={scene}
+              query={query}
+              active={scene.id === selectedScene?.id}
+              unitLabel={unitBySceneId.has(scene.id) ? `连拍 ${unitNumberById.get(unitBySceneId.get(scene.id)!.id)}` : undefined}
+              onOpen={() => openScene(scene.id)}
+            />
+          ))}
         </Box>
       </Box>
     )
@@ -325,6 +377,108 @@ export default function App() {
     )
   }
 
+  function renderUnits() {
+    return (
+      <Box>
+        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={2} mb={2}>
+          <Box>
+            <Typography className="eyebrow">SHOOTING UNITS</Typography>
+            <Typography variant="h4">连拍单元</Typography>
+            <Typography color="text.secondary">按当前顺序自动归组：相邻、故事时间同一天、地点相同且日夜相同。</Typography>
+          </Box>
+          <Chip label={`${units.length} 个单元 · ${pendingUnits.length} 个待审`} color={pendingUnits.length ? 'warning' : 'success'} />
+        </Stack>
+        <Stack gap={1.5}>
+          {units.map((unit, index) => {
+            const counts = getUnitCounts(unit)
+            const decision = state.unitReviews[unit.id] ?? 'pending'
+            const blockers = getUnitBlockers(state.script, unit)
+            const feedback = unitActionFeedback[unit.id]
+            const unitScenes = unit.sceneIds
+              .map((sceneId) => state.script.scenes.find((scene) => scene.id === sceneId))
+              .filter((scene): scene is Scene => Boolean(scene))
+            const unitWarnings = warnings.filter((warning) => unit.sceneIds.includes(warning.sceneId))
+            return (
+              <Paper key={unit.id} className="unit-panel" elevation={0}>
+                <Box className="unit-head">
+                  <Box>
+                    <Typography variant="h6">连拍单元 {index + 1} · {unit.storyDay}</Typography>
+                    <Stack direction="row" gap={1} mt={1} flexWrap="wrap">
+                      <Chip size="small" label={`${unitScenes[0]?.intExt ?? ''} ${unit.location}`} />
+                      <Chip size="small" label={unit.dayNight} variant="outlined" />
+                      <Chip size="small" label={`${unit.sceneIds.length} 场连拍`} variant="outlined" />
+                      <Chip
+                        size="small"
+                        label={decision === 'accepted' ? '单元已接受' : decision === 'ignored' ? '单元已忽略' : '单元待审'}
+                        color={decision === 'accepted' ? 'success' : decision === 'ignored' ? 'default' : 'warning'}
+                      />
+                    </Stack>
+                  </Box>
+                  <Stack direction="row" gap={1} flexWrap="wrap">
+                    <Button size="small" variant={decision === 'accepted' ? 'contained' : 'outlined'} startIcon={<CheckCircle />} onClick={() => applyUnitReview(unit, 'accepted')}>整组接受</Button>
+                    <Button size="small" variant={decision === 'ignored' ? 'contained' : 'outlined'} color="inherit" startIcon={<Block />} onClick={() => applyUnitReview(unit, 'ignored')}>整组忽略</Button>
+                  </Stack>
+                </Box>
+
+                <Box className="unit-counts">
+                  <span className="count pending">待审 {counts.pending}</span>
+                  <span className="count accepted">已接受 {counts.accepted}</span>
+                  <span className="count ignored">已忽略 {counts.ignored}</span>
+                </Box>
+
+                <Box className="unit-scenes">
+                  {unitScenes.map((scene) => (
+                    <button key={scene.id} onClick={() => openScene(scene.id)}>
+                      <strong>{scene.number}</strong>
+                      <span>{scene.slug}</span>
+                      {scene.status === 'locked' && <Chip size="small" icon={<Block />} label="锁定" />}
+                      {!scene.reason.trim() && <Chip size="small" label="理由为空" color="error" variant="outlined" />}
+                    </button>
+                  ))}
+                </Box>
+
+                {blockers.length > 0 && (
+                  <Alert severity="info" sx={{ mt: 1.5 }}>
+                    整组操作需要组内所有场次均未锁定且填写修改理由；当前有 {blockers.length} 场会挡住操作。
+                  </Alert>
+                )}
+                {feedback && (!feedback.blockers || blockers.length > 0) && (
+                  <Alert severity={feedback.severity} sx={{ mt: 1.5 }}>
+                    {feedback.message}
+                    {feedback.blockers && (
+                      <Box component="ul" sx={{ mt: .5, mb: 0, ml: 2, pl: 0 }}>
+                        {feedback.blockers.map((blocker) => (
+                          <li key={blocker.sceneId}>
+                            场景 {blocker.sceneNumber}《{blocker.sceneSlug}》：{blocker.issues.join('、')}
+                          </li>
+                        ))}
+                      </Box>
+                    )}
+                  </Alert>
+                )}
+
+                {unitWarnings.length > 0 && (
+                  <Box className="unit-warning-list">
+                    {unitWarnings.map((warning) => {
+                      const status = state.reviews[warning.id]?.status ?? 'pending'
+                      return (
+                        <Box key={warning.id} className="unit-warning-row">
+                          <WarningAmber fontSize="small" />
+                          <span>{warning.title}</span>
+                          <Chip size="small" label={status === 'accepted' ? '已接受' : status === 'ignored' ? '已忽略' : '待审'} color={status === 'accepted' ? 'success' : status === 'ignored' ? 'default' : 'warning'} />
+                        </Box>
+                      )
+                    })}
+                  </Box>
+                )}
+              </Paper>
+            )
+          })}
+        </Stack>
+      </Box>
+    )
+  }
+
   function renderWarnings() {
     return (
       <Box>
@@ -359,6 +513,7 @@ export default function App() {
                     <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap">
                       <Typography variant="h6">{warning.title}</Typography>
                       <Chip size="small" label={`场景 ${scene?.number ?? '-'}`} onClick={() => openScene(warning.sceneId)} />
+                      <Chip size="small" label={unitBySceneId.get(warning.sceneId) ? `连拍单元 ${unitNumberById.get(unitBySceneId.get(warning.sceneId)!.id) ?? '-'}` : '未归组'} variant="outlined" onClick={() => setView('units')} />
                       <Chip size="small" variant="outlined" label={warning.type === 'character' ? '人物' : warning.type === 'prop' ? '道具' : warning.type === 'wardrobe' ? '服装' : '时间线'} />
                     </Stack>
                     <Typography mt={1}>{warning.detail}</Typography>
@@ -499,8 +654,8 @@ export default function App() {
 
       <Box className="status-strip">
         <span>{store.saveStatus === 'saved' ? '● 已保存到本机' : '◌ 正在保存'}</span>
-        <span>{state.script.scenes.length} 场 / {state.script.scenes.reduce((total, scene) => total + scene.pageLength, 0).toFixed(2)} 页</span>
-        <span className={pendingWarnings.length ? 'attention' : ''}>{pendingWarnings.length} 条问题待审</span>
+        <span>{state.script.scenes.length} 场 / {units.length} 个连拍单元 / {state.script.scenes.reduce((total, scene) => total + scene.pageLength, 0).toFixed(2)} 页</span>
+        <span className={pendingWarnings.length || pendingUnits.length ? 'attention' : ''}>{pendingWarnings.length} 条问题待审 · {pendingUnits.length} 个单元待决</span>
         <span>所有修改自动保存在浏览器本地</span>
       </Box>
 
@@ -525,6 +680,7 @@ export default function App() {
       <Tabs value={view} onChange={(_, value) => setView(value)} variant="scrollable" className="view-tabs">
         <Tab value="outline" label="大纲视图" />
         <Tab value="detail" label="场景详情" />
+        <Tab value="units" label={<Badge badgeContent={pendingUnits.length} color="info"><span className="tab-label">连拍单元</span></Badge>} />
         <Tab value="warnings" label={<Badge badgeContent={pendingWarnings.length} color="warning"><span className="tab-label">警告审阅</span></Badge>} />
         <Tab value="versions" label={<Badge badgeContent={state.versions.length} color="secondary"><span className="tab-label">版本差异</span></Badge>} />
       </Tabs>
@@ -549,6 +705,7 @@ export default function App() {
         )}
         {view === 'outline' && renderOutline()}
         {view === 'detail' && renderSceneDetail()}
+        {view === 'units' && renderUnits()}
         {view === 'warnings' && renderWarnings()}
         {view === 'versions' && renderVersions()}
       </Box>
@@ -651,7 +808,7 @@ export default function App() {
       <Dialog open={versionDialog} onClose={() => setVersionDialog(false)} fullWidth maxWidth="sm">
         <DialogTitle>保存剧本版本</DialogTitle>
         <DialogContent>
-          <Typography color="text.secondary" mb={2}>版本会保存当前全部场景、资料库和审阅备注的快照，之后可与工作稿比较或恢复。</Typography>
+          <Typography color="text.secondary" mb={2}>版本会保存当前全部场景、资料库、问题审阅与连拍单元决定，之后可与工作稿比较或恢复。</Typography>
           <TextField autoFocus fullWidth label="版本名称" value={versionName} onChange={(event) => setVersionName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') createVersion() }} />
         </DialogContent>
         <DialogActions><Button onClick={() => setVersionDialog(false)}>取消</Button><Button variant="contained" onClick={createVersion}>保存</Button></DialogActions>

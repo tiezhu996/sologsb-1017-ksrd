@@ -76,16 +76,34 @@ export interface WarningReview {
   replies: Reply[]
 }
 
+export interface ShootingUnit {
+  id: string
+  storyDay: string
+  location: string
+  dayNight: string
+  sceneIds: string[]
+}
+
+export interface UnitBlocker {
+  sceneId: string
+  sceneNumber: string
+  sceneSlug: string
+  issues: string[]
+}
+
 export interface Version {
   id: string
   name: string
   createdAt: string
   script: Script
+  reviews: Record<string, WarningReview>
+  unitReviews: Record<string, WarningStatus>
 }
 
 export interface ContinuityState {
   script: Script
   reviews: Record<string, WarningReview>
+  unitReviews: Record<string, WarningStatus>
   versions: Version[]
   updatedAt: string
 }

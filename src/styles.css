@@ -61,6 +61,22 @@ mark { padding: 0 .1em; color: #3a2414; background: #f1d486; border-radius: 2px;
 .chip-selector { display: flex; gap: 7px; flex-wrap: wrap; }
 .costume-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-top: 22px; padding-top: 18px; border-top: 1px dashed #d7cec0; }
 .warning-panel { padding: 18px; border: 1px solid #dfd3c3 !important; border-left: 4px solid #c77a22 !important; border-radius: 12px !important; }
+.unit-panel { padding: 18px; border: 1px solid #d8d0c4 !important; border-left: 4px solid #5d7f88 !important; border-radius: 12px !important; background: #fbf8f2 !important; }
+.unit-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.unit-counts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.unit-counts .count { padding: 5px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+.unit-counts .pending { color: #8a4c0e; background: #f6dfbb; }
+.unit-counts .accepted { color: #25604a; background: #dff0e6; }
+.unit-counts .ignored { color: #6c655d; background: #e8e2d8; }
+.unit-scenes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 14px; }
+.unit-scenes button { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 10px 11px; border: 1px solid #ded4c6; border-radius: 9px; color: inherit; background: #fffaf2; text-align: left; cursor: pointer; }
+.unit-scenes button:hover { border-color: #9b7b5f; background: #f5ecdf; }
+.unit-scenes strong { color: #9c7658; }
+.unit-scenes span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
+.unit-warning-list { display: grid; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px dashed #d8d0c4; }
+.unit-warning-row { display: flex; align-items: center; gap: 8px; color: #655d53; font-size: 13px; }
+.unit-warning-row svg { color: #c77a22; }
+.unit-warning-row span { flex: 1; }
 .warning-panel.status-accepted { border-left-color: #377760 !important; background: #f7fbf6; }
 .warning-panel.status-ignored { opacity: .7; border-left-color: #8b8277 !important; }
 .warning-panel-head { display: flex; align-items: flex-start; gap: 13px; }

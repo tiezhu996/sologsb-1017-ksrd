@@ -37,6 +37,10 @@ export const sampleScript: Script = {
     {
       id: 'scene-4', number: '4', slug: '灯塔·黎明', synopsis: '乔叔交出铜钥匙，苏遥确认录音经过剪辑。', intExt: 'EXT', location: '北岬灯塔', dayNight: '清晨', storyTime: '第 2 天 05:30', pageLength: 3.5,
       characterIds: ['char-lin', 'char-su', 'char-qiao'], propIds: ['prop-key', 'prop-recorder'], costumes: { 'char-lin': 'ward-lin-shirt', 'char-su': 'ward-su-coat', 'char-qiao': 'ward-qiao-raincoat' }, revision: 'yellow', status: 'review', reason: '呈现人物做最终决定的动作，而非对白解释。'
+    },
+    {
+      id: 'scene-5', number: '5', slug: '灯塔·晨光', synopsis: '三人沿灯塔外廊复查信号来源，发现被剪断的电缆。', intExt: 'EXT', location: '北岬灯塔', dayNight: '清晨', storyTime: '第 2 天 06:10', pageLength: 1.25,
+      characterIds: ['char-lin', 'char-su', 'char-qiao'], propIds: ['prop-key', 'prop-recorder'], costumes: { 'char-lin': 'ward-lin-shirt', 'char-su': 'ward-su-coat', 'char-qiao': 'ward-qiao-raincoat' }, revision: 'green', status: 'review', reason: '把剪辑线索落到可视物证，便于同地连拍。'
     }
   ]
 }

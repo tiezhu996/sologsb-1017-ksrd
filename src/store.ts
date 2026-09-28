@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sampleScript } from './sample'
-import type { Character, ContinuityState, DiffItem, Prop, Reply, Scene, Script, Version, Wardrobe, WarningItem, WarningReview } from './types'
+import type { Character, ContinuityState, DiffItem, Prop, Reply, Scene, Script, ShootingUnit, UnitBlocker, Version, Wardrobe, WarningItem, WarningReview, WarningStatus } from './types'
 
 const STORAGE_KEY = 'sologsb-1017-continuity-v1'
 const clone = <T,>(value: T): T => structuredClone(value)
@@ -11,12 +11,23 @@ function initialState(): ContinuityState {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as ContinuityState
-      if (parsed.script?.scenes?.length) return parsed
+      if (parsed.script?.scenes?.length) {
+        return {
+          ...parsed,
+          reviews: parsed.reviews ?? {},
+          unitReviews: parsed.unitReviews ?? {},
+          versions: (parsed.versions ?? []).map((version) => ({
+            ...version,
+            reviews: version.reviews ?? {},
+            unitReviews: version.unitReviews ?? {}
+          }))
+        }
+      }
     }
   } catch {
     // Ignore an invalid local draft and restore the bundled example.
   }
-  return { script: clone(sampleScript), reviews: {}, versions: [], updatedAt: new Date().toISOString() }
+  return { script: clone(sampleScript), reviews: {}, unitReviews: {}, versions: [], updatedAt: new Date().toISOString() }
 }
 
 export function deriveWarnings(script: Script): WarningItem[] {
@@ -99,6 +110,50 @@ export function deriveWarnings(script: Script): WarningItem[] {
   return warnings
 }
 
+function storyDayKey(storyTime: string) {
+  const matched = storyTime.match(/第\s*(\d+)\s*天/)
+  return matched ? `第 ${matched[1]} 天` : storyTime.trim().replace(/\s+/g, ' ')
+}
+
+function unitKey(storyDay: string, location: string, dayNight: string) {
+  return [storyDay, location, dayNight].map((value) => value.trim().replace(/\s+/g, ' ')).join('|').toLowerCase()
+}
+
+export function deriveShootingUnits(script: Script): ShootingUnit[] {
+  const groups: Array<Omit<ShootingUnit, 'id'>> = []
+  let current: Omit<ShootingUnit, 'id'> | undefined
+
+  script.scenes.forEach((scene) => {
+    const storyDay = storyDayKey(scene.storyTime)
+    const location = scene.location.trim()
+    const dayNight = scene.dayNight.trim()
+    if (current && current.storyDay === storyDay && current.location === location && current.dayNight === dayNight) {
+      current.sceneIds.push(scene.id)
+    } else {
+      current = { storyDay, location, dayNight, sceneIds: [scene.id] }
+      groups.push(current)
+    }
+  })
+
+  return groups.map((group) => ({
+    ...group,
+    id: `unit-${unitKey(group.storyDay, group.location, group.dayNight)}-${[...group.sceneIds].sort().join('-')}`.replace(/[^\p{L}\p{N}-]+/gu, '-')
+  }))
+}
+
+export function getUnitBlockers(script: Script, unit: ShootingUnit): UnitBlocker[] {
+  const sceneById = new Map(script.scenes.map((scene) => [scene.id, scene]))
+  return unit.sceneIds.flatMap((sceneId) => {
+    const scene = sceneById.get(sceneId)
+    if (!scene) return []
+    const issues = [
+      ...(scene.status === 'locked' ? ['该场次已锁定'] : []),
+      ...(scene.reason.trim() ? [] : ['修改理由为空'])
+    ]
+    return issues.length ? [{ sceneId, sceneNumber: scene.number, sceneSlug: scene.slug, issues }] : []
+  })
+}
+
 export function diffScript(base: Script, current: Script): DiffItem[] {
   const fields: Array<{ key: keyof Scene; label: string }> = [
     { key: 'slug', label: '场名' },
@@ -135,11 +190,18 @@ export function diffScript(base: Script, current: Script): DiffItem[] {
   return result
 }
 
+type WorkSnapshot = Pick<ContinuityState, 'script' | 'reviews' | 'unitReviews'>
+const cloneWork = (source: ContinuityState): WorkSnapshot => ({
+  script: clone(source.script),
+  reviews: clone(source.reviews),
+  unitReviews: clone(source.unitReviews)
+})
+
 export function useContinuityStore() {
   const [state, setState] = useState<ContinuityState>(initialState)
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving'>('saved')
-  const undoRef = useRef<Script[]>([])
-  const redoRef = useRef<Script[]>([])
+  const undoRef = useRef<WorkSnapshot[]>([])
+  const redoRef = useRef<WorkSnapshot[]>([])
   const saveTimer = useRef<number | undefined>(undefined)
 
   useEffect(() => {
@@ -152,23 +214,27 @@ export function useContinuityStore() {
     return () => window.clearTimeout(saveTimer.current)
   }, [state])
 
-  const mutate = useCallback((mutator: (script: Script) => void) => {
+  const commitWork = useCallback((updater: (work: WorkSnapshot) => void) => {
     setState((previous) => {
-      const next = clone(previous.script)
-      mutator(next)
-      undoRef.current.push(clone(previous.script))
+      const next = cloneWork(previous)
+      updater(next)
+      undoRef.current.push(cloneWork(previous))
       if (undoRef.current.length > 80) undoRef.current.shift()
       redoRef.current = []
-      return { ...previous, script: next, updatedAt: new Date().toISOString() }
+      return { ...previous, ...next, updatedAt: new Date().toISOString() }
     })
   }, [])
+
+  const mutate = useCallback((mutator: (script: Script) => void) => {
+    commitWork((work) => mutator(work.script))
+  }, [commitWork])
 
   const undo = useCallback(() => {
     setState((previous) => {
       const target = undoRef.current.pop()
       if (!target) return previous
-      redoRef.current.push(clone(previous.script))
-      return { ...previous, script: target, updatedAt: new Date().toISOString() }
+      redoRef.current.push(cloneWork(previous))
+      return { ...previous, ...target, updatedAt: new Date().toISOString() }
     })
   }, [])
 
@@ -176,8 +242,8 @@ export function useContinuityStore() {
     setState((previous) => {
       const target = redoRef.current.pop()
       if (!target) return previous
-      undoRef.current.push(clone(previous.script))
-      return { ...previous, script: target, updatedAt: new Date().toISOString() }
+      undoRef.current.push(cloneWork(previous))
+      return { ...previous, ...target, updatedAt: new Date().toISOString() }
     })
   }, [])
 
@@ -280,53 +346,74 @@ export function useContinuityStore() {
   }, [mutate])
 
   const setReviewStatus = useCallback((warningId: string, status: WarningReview['status']) => {
-    setState((previous) => ({
-      ...previous,
-      reviews: {
-        ...previous.reviews,
-        [warningId]: { ...(previous.reviews[warningId] ?? { replies: [] }), status }
-      },
-      updatedAt: new Date().toISOString()
-    }))
-  }, [])
+    commitWork((work) => {
+      work.reviews[warningId] = { ...(work.reviews[warningId] ?? { replies: [] }), status }
+    })
+  }, [commitWork])
 
   const addReply = useCallback((warningId: string, author: string, text: string) => {
     if (!text.trim()) return
     const reply: Reply = { id: id('reply'), author, text: text.trim(), createdAt: new Date().toISOString() }
-    setState((previous) => ({
-      ...previous,
-      reviews: {
-        ...previous.reviews,
-        [warningId]: {
-          status: previous.reviews[warningId]?.status ?? 'pending',
-          replies: [...(previous.reviews[warningId]?.replies ?? []), reply]
-        }
-      },
-      updatedAt: new Date().toISOString()
-    }))
-  }, [])
+    commitWork((work) => {
+      work.reviews[warningId] = {
+        status: work.reviews[warningId]?.status ?? 'pending',
+        replies: [...(work.reviews[warningId]?.replies ?? []), reply]
+      }
+    })
+  }, [commitWork])
+
+  const setUnitReviewStatus = useCallback((unit: ShootingUnit, status: WarningStatus): { ok: true } | { ok: false; blockers: UnitBlocker[] } => {
+    const blockers = getUnitBlockers(state.script, unit)
+    if (blockers.length) return { ok: false, blockers }
+
+    commitWork((work) => {
+      work.unitReviews[unit.id] = status
+      const sceneIds = new Set(unit.sceneIds)
+      deriveWarnings(work.script)
+        .filter((warning) => sceneIds.has(warning.sceneId))
+        .forEach((warning) => {
+          work.reviews[warning.id] = { ...(work.reviews[warning.id] ?? { replies: [] }), status }
+        })
+    })
+    return { ok: true }
+  }, [commitWork, state.script])
 
   const createVersion = useCallback((name: string) => {
-    const version: Version = { id: id('version'), name: name.trim() || `版本 ${state.versions.length + 1}`, createdAt: new Date().toISOString(), script: clone(state.script) }
+    const version: Version = {
+      id: id('version'),
+      name: name.trim() || `版本 ${state.versions.length + 1}`,
+      createdAt: new Date().toISOString(),
+      script: clone(state.script),
+      reviews: clone(state.reviews),
+      unitReviews: clone(state.unitReviews)
+    }
     setState((previous) => ({ ...previous, versions: [version, ...previous.versions] }))
     return version
-  }, [state.script, state.versions.length])
+  }, [state.script, state.reviews, state.unitReviews, state.versions.length])
 
   const restoreVersion = useCallback((versionId: string) => {
     const version = state.versions.find((item) => item.id === versionId)
     if (!version) return
-    mutate((script) => { Object.assign(script, clone(version.script)) })
-  }, [mutate, state.versions])
+    commitWork((work) => {
+      work.script = clone(version.script)
+      work.reviews = clone(version.reviews ?? {})
+      work.unitReviews = clone(version.unitReviews ?? {})
+    })
+  }, [commitWork, state.versions])
 
   const reset = useCallback(() => {
-    mutate((script) => { Object.assign(script, clone(sampleScript)) })
-    setState((previous) => ({ ...previous, reviews: {} }))
-  }, [mutate])
+    commitWork((work) => {
+      work.script = clone(sampleScript)
+      work.reviews = {}
+      work.unitReviews = {}
+    })
+  }, [commitWork])
 
   return {
     state,
     saveStatus,
     warnings: deriveWarnings(state.script),
+    units: deriveShootingUnits(state.script),
     updateScriptField,
     updateScene,
     toggleSceneRelation,
@@ -341,6 +428,7 @@ export function useContinuityStore() {
     addWardrobe,
     updateWardrobe,
     setReviewStatus,
+    setUnitReviewStatus,
     addReply,
     createVersion,
     restoreVersion,
